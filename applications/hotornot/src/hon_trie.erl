@@ -40,8 +40,8 @@
        ,{'trie', Builder, Trie}
        ).
 
--define(STATE_READY(Trie, Db), {'ready', Trie, Db}).
--define(STATE_BUILDING(Trie, Db, PidRef), {'building', Trie, Db, PidRef}).
+-define(STATE_READY(Trie, RatedeckDb), {'ready', Trie, RatedeckDb}).
+-define(STATE_BUILDING(Trie, RatedeckDb, PidRef), {'building', Trie, RatedeckDb, PidRef}).
 
 -type state() :: ?STATE_READY(trie:trie(), ne_binary()) |
                  ?STATE_BUILDING(trie:trie() | 'undefined', ne_binary(), pid_ref()).
@@ -118,16 +118,16 @@ start_builder(RatedeckDb) ->
 -spec handle_call(any(), pid_ref(), state()) ->
                          {'noreply', state()} |
                          {'reply', match_return(), state()}.
-handle_call({'match_did', _DID}, _From, ?STATE_BUILDING('undefined', _Db, _PidRef)=State) ->
+handle_call({'match_did', _DID}, _From, ?STATE_BUILDING('undefined', _RatedeckDb, _PidRef)=State) ->
     {'reply', {'error', 'no_trie'}, State};
-handle_call({'match_did', DID}, _From, ?STATE_BUILDING(Trie, _Db, {_Pid, _Ref})=State) ->
+handle_call({'match_did', DID}, _From, ?STATE_BUILDING(Trie, _RatedeckDb, {_Pid, _Ref})=State) ->
     Resp = match_did_in_trie(DID, Trie),
     {'reply', Resp, State};
-handle_call({'match_did', DID}, _From, ?STATE_READY(Trie, _Db)=State) ->
+handle_call({'match_did', DID}, _From, ?STATE_READY(Trie, _RatedeckDb)=State) ->
     Resp = match_did_in_trie(DID, Trie),
     {'reply', Resp, State};
 
-handle_call('rebuild', _From, ?STATE_BUILDING(_Trie, _Db, {Pid, _Ref})=State) ->
+handle_call('rebuild', _From, ?STATE_BUILDING(_Trie, _RatedeckDb, {Pid, _Ref})=State) ->
     {'reply', {'error', {'rebuilding', Pid}}, State};
 handle_call('rebuild', _From, ?STATE_READY(Trie, RatedeckDb)) ->
     {Pid, _} = PidRef = start_builder(RatedeckDb),
@@ -159,13 +159,13 @@ handle_info({'build_timeout', PidRef}, ?STATE_BUILDING(Trie, RatedeckDb, {Pid, R
     erlang:demonitor(Ref, ['flush']),
     erlang:exit(Pid, 'build_timeout'),
     {'noreply', ?STATE_READY(Trie, RatedeckDb)};
-handle_info({'build_timeout', _PidRef}, ?STATE_READY(_Trie, _Db)=State) ->
+handle_info({'build_timeout', _PidRef}, ?STATE_READY(_Trie, _RatedeckDb)=State) ->
     %% It's ok, build completed already
     {'noreply', State};
-handle_info({'DOWN', Ref, 'process', Pid, _Reason}, ?STATE_BUILDING(Trie, Db, {Pid, Ref})) ->
+handle_info({'DOWN', Ref, 'process', Pid, _Reason}, ?STATE_BUILDING(Trie, RatedeckDb, {Pid, Ref})) ->
     lager:debug("rebuild proc ~p:~p down: ~p", [Pid, Ref, _Reason]),
-    {'noreply', ?STATE_READY(Trie, Db)};
-handle_info({'DOWN', _Ref, 'process', _Pid, _Reason}, ?STATE_READY(_Trie, _Db)=State) ->
+    {'noreply', ?STATE_READY(Trie, RatedeckDb)};
+handle_info({'DOWN', _Ref, 'process', _Pid, _Reason}, ?STATE_READY(_Trie, _RatedeckDb)=State) ->
     {'norply', State};
 handle_info(Msg, State) ->
     lager:info("unhandled message ~p",[Msg]),
