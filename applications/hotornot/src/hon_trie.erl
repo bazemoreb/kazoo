@@ -48,11 +48,11 @@
 
 -spec start_link(ne_binary()) -> {'ok', pid()}.
 start_link(RatedeckDb) ->
-    ProcName = trie_proc(RatedeckDb),
+    ProcName = trie_proc_name(RatedeckDb),
     gen_server:start_link({'local', ProcName}, ?MODULE, [RatedeckDb], []).
 
--spec trie_proc(ne_binary()) -> atom().
-trie_proc(Ratedeck) ->
+-spec trie_proc_name(ne_binary()) -> atom().
+trie_proc_name(Ratedeck) ->
     RatedeckDb = kzd_ratedeck:format_ratedeck_db(Ratedeck),
     kz_term:to_atom(<<"hon_trie_", RatedeckDb/binary>>, 'true').
 
@@ -64,7 +64,7 @@ match_did(ToDID, AccountId) ->
     match_did(ToDID, AccountId, 'undefined').
 match_did(ToDID, AccountId, RatedeckId) ->
     Ratedeck = hon_util:account_ratedeck(AccountId, RatedeckId),
-    ProcName = trie_proc(Ratedeck),
+    ProcName = trie_proc_name(Ratedeck),
 
     case gen_server:call(ProcName, {'match_did', kz_term:to_list(ToDID)}) of
         {'error', 'not_found'} ->
@@ -104,7 +104,7 @@ load_rate(RateId, Acc, RatedeckDb) ->
 
 -spec init([ne_binary()]) -> {'ok', state()}.
 init([RatedeckDb]) ->
-    kz_util:put_callid(trie_proc(RatedeckDb)),
+    kz_util:put_callid(trie_proc_name(RatedeckDb)),
     PidRef = start_builder(RatedeckDb),
     lager:debug("building trie for ~s in ~p", [RatedeckDb, PidRef]),
     {'ok', ?STATE_BUILDING('undefined', RatedeckDb, PidRef)}.
@@ -199,19 +199,19 @@ process_conf_update(_ConfUpdate, _Type) ->
 
 -spec process_db_update(ne_binary(), ne_binary()) -> 'ok'.
 process_db_update(?KZ_RATES_DB=RatedeckId, ?DB_EDITED) ->
-    {'ok', Pid} = gen_server:call(trie_proc(RatedeckId), 'rebuild'),
+    {'ok', Pid} = gen_server:call(trie_proc_name(RatedeckId), 'rebuild'),
     lager:info("ratedeck ~s changed, rebuilding trie in ~p", [Pid]);
 process_db_update(?KZ_RATES_DB=RatedeckId, ?DB_DELETED) ->
-    Proc = trie_proc(RatedeckId),
+    Proc = trie_proc_name(RatedeckId),
     hon_tries_sup:stop_trie(Proc),
     lager:info("ratedeck ~s deleted, stopping the trie at ~p", [RatedeckId, Proc]);
 process_db_update(?MATCH_RATEDECK_DB_ENCODED(_)=RatedeckDb, ?DB_CREATED) ->
     maybe_start_trie_server(RatedeckDb);
 process_db_update(?MATCH_RATEDECK_DB_ENCODED(_)=RatedeckDb, ?DB_EDITED) ->
-    {'ok', Pid} = gen_server:call(trie_proc(RatedeckDb), 'rebuild'),
+    {'ok', Pid} = gen_server:call(trie_proc_name(RatedeckDb), 'rebuild'),
     lager:info("ratedeck ~s changed, rebuiding trie in ~p", [RatedeckDb, Pid]);
 process_db_update(?MATCH_RATEDECK_DB_ENCODED(_)=RatedeckDb, ?DB_DELETED) ->
-    Pid = trie_proc(RatedeckDb),
+    Pid = trie_proc_name(RatedeckDb),
     hon_tries_sup:stop_trie(Pid),
     lager:info("ratedeck ~s deleted, stopping the trie at ~p", [RatedeckDb, Pid]);
 process_db_update(_Db, _Action) ->
