@@ -19,6 +19,8 @@
         ,should_use_trie/0, use_trie/0, dont_use_trie/0
         ,trie_module/0, use_trie_lru/0
         ,trie_build_timeout_ms/0
+        ,lru_expires_s/0
+
         ]).
 
 -include("hotornot.hrl").
@@ -112,3 +114,7 @@ set_rate_version(Version) ->
 -spec should_account_filter_by_resource(ne_binary()) -> boolean().
 should_account_filter_by_resource(AccountId) ->
     kapps_account_config:get_from_reseller(AccountId, ?APP_NAME, <<"filter_by_resource_id">>, 'false').
+
+-spec lru_expires_s() -> non_neg_integer().
+lru_expires_s() ->
+    kapps_config:get_integer(?APP_NAME, <<"trie_lru_expires_s">>, ?SECONDS_IN_DAY).
