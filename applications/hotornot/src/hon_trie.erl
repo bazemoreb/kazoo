@@ -21,6 +21,7 @@
 -export([start_link/1
         ,match_did/2, match_did/3
         ,rebuild/0
+        ,trie_proc_name/1
         ]).
 
 -export([init/1
@@ -48,8 +49,13 @@
 
 -spec start_link(ne_binary()) -> {'ok', pid()}.
 start_link(RatedeckDb) ->
-    ProcName = trie_proc_name(RatedeckDb),
-    gen_server:start_link({'local', ProcName}, ?MODULE, [RatedeckDb], []).
+    case hotornot_config:trie_module() of
+        ?MODULE ->
+            ProcName = trie_proc_name(RatedeckDb),
+            gen_server:start_link({'local', ProcName}, ?MODULE, [RatedeckDb], []);
+        'hon_trie_lru' ->
+            hon_trie_lru:start_link(RatedeckDb)
+    end.
 
 -spec trie_proc_name(ne_binary()) -> atom().
 trie_proc_name(Ratedeck) ->
