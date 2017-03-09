@@ -17,6 +17,7 @@
         ,should_account_filter_by_resource/1
 
         ,should_use_trie/0, use_trie/0, dont_use_trie/0
+        ,trie_module/0, use_trie_lru/0
         ,trie_build_timeout_ms/0
         ]).
 
@@ -77,12 +78,23 @@ should_use_trie() ->
 -spec use_trie() -> 'ok'.
 use_trie() ->
     {'ok', _} = kapps_config:set_default(?APP_NAME, <<"use_trie">>, 'true'),
+    {'ok', _} = kapps_config:set_default(?APP_NAME, <<"trie_module">>, 'hon_trie'),
     'ok'.
 
 -spec dont_use_trie() -> 'ok'.
 dont_use_trie() ->
     {'ok', _} = kapps_config:set_default(?APP_NAME, <<"use_trie">>, 'false'),
     'ok'.
+
+-spec use_trie_lru() -> 'ok'.
+use_trie_lru() ->
+    use_trie(),
+    {'ok', _} = kapps_config:set_default(?APP_NAME, <<"trie_module">>, 'hon_trie_lru'),
+    'ok'.
+
+-spec trie_module() -> atom().
+trie_module() ->
+    kapps_config:get_atom(?APP_NAME, <<"trie_module">>, 'hon_trie').
 
 -spec trie_build_timeout_ms() -> pos_integer().
 trie_build_timeout_ms() ->
