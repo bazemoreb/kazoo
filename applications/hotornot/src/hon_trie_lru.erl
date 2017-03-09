@@ -33,13 +33,13 @@
         ,code_change/3
         ]).
 
--export([handle_db_update/2]).
-
 -include("hotornot.hrl").
 
--define(STATE_READY(Trie, RatedeckDb), {'ready', Trie, RatedeckDb}).
+-define(STATE_READY(Trie, RatedeckDb, CheckRef), {'ready', Trie, RatedeckDb, CheckRef}).
 
--type state() :: ?STATE_READY(trie:trie(), ne_binary()).
+-define(CHECK_MSG, 'check_trie').
+
+-type state() :: ?STATE_READY(trie:trie(), ne_binary(), reference()).
 -type rate_entry() :: {ne_binary(), gregorian_seconds()}.
 -type rate_entries() :: [rate_entry()].
 
@@ -55,8 +55,8 @@ start_link(RatedeckDb) ->
 match_did(ToDID, AccountId) ->
     match_did(ToDID, AccountId, 'undefined').
 match_did(ToDID, AccountId, RatedeckId) ->
-    RatedeckId = hon_util:account_ratedeck(AccountId, RatedeckId),
-    ProcName = hon_trie:trie_proc_name(RatedeckId),
+    AccountRatedeckId = hon_util:account_ratedeck(AccountId, RatedeckId),
+    ProcName = hon_trie:trie_proc_name(AccountRatedeckId),
 
     case gen_server:call(ProcName, {'match_did', kz_term:to_list(ToDID)}) of
         {'error', 'not_found'} ->
@@ -67,7 +67,7 @@ match_did(ToDID, AccountId, RatedeckId) ->
             {'error', E};
         {'ok', {_Prefix, RateIds}} ->
             lager:info("candidate rates for ~s: ~s ~p", [ToDID, _Prefix, RateIds]),
-            load_rates(RatedeckId, RateIds)
+            load_rates(AccountRatedeckId, RateIds)
     end.
 
 -spec load_rates(ne_binary(), ne_binaries()) -> {'ok', kzd_rate:docs()}.
@@ -91,85 +91,76 @@ cache_rates(RatedeckId, Rates) ->
 -spec init([ne_binary()]) -> {'ok', state()}.
 init([RatedeckDb]) ->
     kz_util:put_callid(hon_trie:trie_proc_name(RatedeckDb)),
-    {'ok', ?STATE_READY(trie:new(), RatedeckDb)}.
+    ExpiresCheckRef = start_expires_check_timer(),
+    {'ok', ?STATE_READY(trie:new(), RatedeckDb, ExpiresCheckRef)}.
+
+-spec start_expires_check_timer() -> reference().
+start_expires_check_timer() ->
+    ExpiresS = hotornot_config:lru_expires_s(),
+    Check = (ExpiresS div 2) * ?MILLISECONDS_IN_SECOND,
+    erlang:start_timer(Check, self(), ?CHECK_MSG).
 
 -spec handle_call(any(), pid_ref(), state()) ->
                          {'noreply', state()} |
                          {'reply', match_return(), state()}.
-handle_call({'match_did', DID}, _From, ?STATE_READY(Trie, RatedeckDb)) ->
+handle_call({'match_did', DID}, _From, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
     {UpdatedTrie, Resp} = match_did_in_trie(DID, Trie),
-    {'reply', Resp, ?STATE_READY(UpdatedTrie, RatedeckDb)};
+    {'reply', Resp, ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
 handle_call(_Req, _From, State) ->
     {'noreply', State}.
 
 -spec handle_cast(any(), state()) -> {'noreply', state()}.
-handle_cast({'cache_rates', Rates}, ?STATE_READY(Trie, RatedeckDb)) ->
+handle_cast({'cache_rates', Rates}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
     UpdatedTrie = handle_caching_of_rates(Trie, Rates),
-    {'noreply', ?STATE_READY(UpdatedTrie, RatedeckDb)};
+    {'noreply', ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
+handle_cast({'expunge_prefix', Prefix}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
+    UpdatedTrie = trie:erase(Prefix, Trie),
+    {'noreply', ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
 handle_cast(_Req, State) ->
     lager:info("unhandled cast ~p", [_Req]),
     {'noreply', State}.
 
 -spec handle_info(any(), state()) -> {'noreply', state()}.
+handle_info({'timeout', CheckRef, ?CHECK_MSG}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
+    _ = check_expired_entries(Trie),
+    {'noreply', ?STATE_READY(Trie, RatedeckDb, start_expires_check_timer())};
 handle_info(Msg, State) ->
     lager:debug("unhandled message ~p",[Msg]),
     {'noreply', State}.
 
+-spec check_expired_entries(trie:trie()) -> 'ok'.
+check_expired_entries(Trie) ->
+    Self = self(),
+    _ = spawn(fun() -> check_expired_entries(Trie, Self) end),
+    'ok'.
+
+check_expired_entries(Trie, ParentPid) ->
+    lager:debug("checking trie for expired entries"),
+    Expires = hotornot_config:lru_expires_s(),
+    Now = kz_time:current_tstamp(),
+    trie:foldl(fun check_if_expired/3
+              ,{ParentPid, Now - Expires}
+              ,Trie
+              ).
+
+check_if_expired(Prefix, Rates, {ParentPid, OldestTimestamp}=Acc) ->
+    case [RateId || {RateId, LastUsed} <- Rates, LastUsed < OldestTimestamp] of
+        [] -> 'ok';
+        [_|_]=Rates ->
+            lager:debug("prefix ~s has expired rates: ~s"
+                       ,[Prefix, kz_binary:join(Rates)]
+                       ),
+            gen_server:cast(ParentPid, {'expunge_prefix', Prefix})
+    end,
+    Acc.
+
 -spec terminate(any(), state()) -> 'ok'.
-terminate(_Reason, ?STATE_READY(_, _)) ->
+terminate(_Reason, ?STATE_READY(_, _, _)) ->
     lager:info("terminating: ~p", [_Reason]).
 
 -spec code_change(any(), state(), any()) -> {'ok', state()}.
 code_change(_Vsn, State, _Extra) ->
     {'ok', State}.
-
--spec handle_db_update(kz_json:object(), kz_proplist()) -> 'ok'.
-handle_db_update(ConfUpdate, _Props) ->
-    'true' = kapi_conf:doc_update_v(ConfUpdate),
-
-    lager:debug("conf update: ~p", [ConfUpdate]),
-    process_conf_update(ConfUpdate, kapi_conf:get_type(ConfUpdate)).
-
-process_conf_update(ConfUpdate, <<"database">>) ->
-    process_db_update(kapi_conf:get_database(ConfUpdate)
-                     ,kz_api:event_name(ConfUpdate)
-                     );
-process_conf_update(_ConfUpdate, _Type) ->
-    'ok'.
-
--spec process_db_update(ne_binary(), ne_binary()) -> 'ok'.
-process_db_update(?KZ_RATES_DB=RatedeckId, ?DB_EDITED) ->
-    {'ok', Pid} = gen_server:call(hon_trie:trie_proc_name(RatedeckId), 'rebuild'),
-    lager:info("ratedeck ~s changed, rebuilding trie in ~p", [Pid]);
-process_db_update(?KZ_RATES_DB=RatedeckId, ?DB_DELETED) ->
-    Proc = hon_trie:trie_proc_name(RatedeckId),
-    hon_tries_sup:stop_trie(Proc),
-    lager:info("ratedeck ~s deleted, stopping the trie at ~p", [RatedeckId, Proc]);
-process_db_update(?MATCH_RATEDECK_DB_ENCODED(_)=RatedeckDb, ?DB_CREATED) ->
-    maybe_start_trie_server(RatedeckDb);
-process_db_update(?MATCH_RATEDECK_DB_ENCODED(_)=RatedeckDb, ?DB_EDITED) ->
-    {'ok', Pid} = gen_server:call(hon_trie:trie_proc_name(RatedeckDb), 'rebuild'),
-    lager:info("ratedeck ~s changed, rebuiding trie in ~p", [RatedeckDb, Pid]);
-process_db_update(?MATCH_RATEDECK_DB_ENCODED(_)=RatedeckDb, ?DB_DELETED) ->
-    Pid = hon_trie:trie_proc_name(RatedeckDb),
-    hon_tries_sup:stop_trie(Pid),
-    lager:info("ratedeck ~s deleted, stopping the trie at ~p", [RatedeckDb, Pid]);
-process_db_update(_Db, _Action) ->
-    lager:debug("ignoring ~s: ~s", [_Db, _Action]).
-
--spec maybe_start_trie_server(ne_binary()) -> 'ok'.
-maybe_start_trie_server(RatedeckDb) ->
-    case hon_tries_sup:start_trie(RatedeckDb) of
-        {'ok', Pid} ->
-            lager:info("starting new trie for ratedeck ~s in ~p", [RatedeckDb, Pid]);
-        {'error', {'already_started', Pid}} ->
-            lager:info("trie running for ratedeck ~s in ~p", [RatedeckDb, Pid]);
-        {'error', 'already_present'} ->
-            {'ok', Pid} = hon_tries_sup:restart_trie(RatedeckDb),
-            lager:info("restarted trie for ratedeck ~s in ~p", [RatedeckDb, Pid]);
-        {'error', _E} ->
-            lager:debug("failed to start trie for ~s: ~p", [RatedeckDb, _E])
-    end.
 
 -spec match_did_in_trie(string(), trie:trie()) -> {trie:tie(), match_return()}.
 match_did_in_trie(DID, Trie) ->
