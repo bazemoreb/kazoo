@@ -187,4 +187,7 @@ cache_rate(Rate, Trie) ->
     Id = kz_doc:id(Rate),
     Prefix = kz_term:to_list(kzd_rate:prefix(Rate)),
     lager:debug("caching ~s for prefix ~s", [Id, Prefix]),
-    trie:append(Prefix, {Id, kz_time:current_tstamp()}, Trie).
+    trie:update(Prefix
+               ,fun(Rates) -> props:insert_value(Rate, kz_time:current_tstamp(), Rates) end
+               ,Trie
+               ).
