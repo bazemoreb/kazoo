@@ -19,17 +19,28 @@
         ,precondition/2
 
         ,correct/0
-         %%,correct_parallel/0
+        ,correct_parallel/0
         ]).
 
 correct_test_() ->
     [{'timeout'
-     ,10 * ?SECONDS_IN_MINUTE
+     ,30 * ?SECONDS_IN_MINUTE
      ,[?_assertEqual('true'
                     ,proper:quickcheck(?MODULE:correct(), [{'to_file', 'user'}])
                     )
       ]
-     }].
+     }
+    ].
+
+correct_parallel_test_() ->
+    [{'timeout'
+     ,30 * ?SECONDS_IN_MINUTE
+     ,[?_assertEqual('true'
+                    ,proper:quickcheck(?MODULE:correct_parallel(), [{'to_file', 'user'}])
+                    )
+      ]
+     }
+    ].
 
 correct() ->
     ?FORALL(Cmds
@@ -38,6 +49,24 @@ correct() ->
                begin
                    {'ok', _Pid} = hon_trie_lru:start_link(?KZ_RATES_DB, 2), % expire after 2 seconds
                    {History, State, Result} = run_commands(?MODULE, Cmds),
+                   hon_trie_lru:stop(?KZ_RATES_DB),
+
+                   ?WHENFAIL(?debugFmt("Final State: ~p\nFailing Cmds: ~p\nResult: ~p~n"
+                                      ,[State, zip(Cmds, History), Result]
+                                      )
+                            ,aggregate(command_names(Cmds), Result =:= 'ok')
+                            )
+               end
+              )
+           ).
+
+correct_parallel() ->
+    ?FORALL(Cmds
+           ,parallel_commands(?MODULE)
+           ,?TRAPEXIT(
+               begin
+                   {'ok', _Pid} = hon_trie_lru:start_link(?KZ_RATES_DB, 2), % expire after 2 seconds
+                   {History, State, Result} = run_parallel_commands(?MODULE, Cmds),
                    hon_trie_lru:stop(?KZ_RATES_DB),
 
                    ?WHENFAIL(?debugFmt("Final State: ~p\nFailing Cmds: ~p\nResult: ~p~n"
