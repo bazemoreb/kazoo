@@ -62,37 +62,35 @@ trie_proc_name(Ratedeck) ->
     RatedeckDb = kzd_ratedeck:format_ratedeck_db(Ratedeck),
     kz_term:to_atom(<<"hon_trie_", RatedeckDb/binary>>, 'true').
 
--type match_return() :: {'error', any()} |
-                        {'ok', {string(), ne_binaries()}}.
+-ifdef(TEST).
+match_did(ToDID, AccountId) ->
+    match_did(ToDID, AccountId, ?KZ_RATES_DB).
+
+match_did(ToDID, _AccountId, RatedeckId) ->
+    ProcName = trie_proc_name(RatedeckId),
+
+    case gen_server:call(ProcName, {'match_did', kz_term:to_list(ToDID)}) of
+        {'error', _}=Error -> Error;
+        {'ok', {_Prefix, RateIds}} -> {'ok', RateIds}
+    end.
+-else.
+
 -spec match_did(ne_binary(), api_ne_binary()) -> match_return().
 -spec match_did(ne_binary(), api_ne_binary(), api_ne_binary()) -> match_return().
 match_did(ToDID, AccountId) ->
     match_did(ToDID, AccountId, 'undefined').
+
 match_did(ToDID, AccountId, RatedeckId) ->
     Ratedeck = hon_util:account_ratedeck(AccountId, RatedeckId),
     ProcName = trie_proc_name(Ratedeck),
 
     case gen_server:call(ProcName, {'match_did', kz_term:to_list(ToDID)}) of
-        {'error', 'not_found'} ->
-            lager:debug("failed to find rate for ~s", [ToDID]),
-            {'ok', []};
-        {'error', E} ->
-            lager:warning("failed to find rate for ~s, got error ~p", [ToDID, E]),
-            {'error', E};
+        {'error', _}=Error ->
+            lager:warning("failed to find rate for ~s, got error ~p", [ToDID, Error]),
+            Error;
         {'ok', {_Prefix, RateIds}} ->
             lager:info("candidate rates for ~s: ~s ~p", [ToDID, _Prefix, RateIds]),
             load_rates(Ratedeck, RateIds)
-    end.
-
--spec rebuild() -> {'ok', pid()}.
-rebuild() ->
-    case gen_server:call(?MODULE, 'rebuild') of
-        {'ok', Pid} ->
-            lager:debug("rebuilding trie in ~p", [Pid]),
-            {'ok', Pid};
-        {'error', E} ->
-            lager:warning("error rebuilding trie ~p", [E]),
-            {'error', E}
     end.
 
 -spec load_rates(ne_binary(), ne_binaries()) -> {'ok', kzd_rate:docs()}.
@@ -106,6 +104,19 @@ load_rate(RateId, Acc, RatedeckDb) ->
         {'error', _} -> Acc;
         {'ok', RateDoc} ->
             [kzd_rate:set_ratedeck(RateDoc, kzd_ratedeck:format_ratedeck_id(RatedeckDb)) | Acc]
+    end.
+
+-endif.
+
+-spec rebuild() -> {'ok', pid()}.
+rebuild() ->
+    case gen_server:call(?MODULE, 'rebuild') of
+        {'ok', Pid} ->
+            lager:debug("rebuilding trie in ~p", [Pid]),
+            {'ok', Pid};
+        {'error', E} ->
+            lager:warning("error rebuilding trie ~p", [E]),
+            {'error', E}
     end.
 
 -spec init([ne_binary()]) -> {'ok', state()}.
