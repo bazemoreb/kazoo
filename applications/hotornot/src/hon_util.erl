@@ -112,6 +112,11 @@ fetch_rates_from_ratedeck(RatedeckDb, Keys) ->
 
 -spec account_ratedeck(api_ne_binary()) -> ne_binary().
 -spec account_ratedeck(api_ne_binary(), api_ne_binary()) -> ne_binary().
+
+-ifdef(TEST).
+account_ratedeck(_AccountId) -> ?KZ_RATES_DB.
+account_ratedeck(_AccountId, _RatedeckId) -> ?KZ_RATES_DB.
+-else.
 account_ratedeck(AccountId) ->
     account_ratedeck(AccountId, 'undefined').
 
@@ -149,6 +154,7 @@ reseller_ratedeck(_AccountId, ResellerId) ->
                       ),
             kzd_ratedeck:format_ratedeck_db(RatedeckId)
     end.
+-endif.
 
 -spec build_keys(ne_binary()) -> [integer()].
 build_keys(Number) ->

@@ -116,5 +116,9 @@ should_account_filter_by_resource(AccountId) ->
     kapps_account_config:get_from_reseller(AccountId, ?APP_NAME, <<"filter_by_resource_id">>, 'false').
 
 -spec lru_expires_s() -> non_neg_integer().
+-ifdef(TEST).
+lru_expires_s() -> ?SECONDS_IN_DAY.
+-else.
 lru_expires_s() ->
     kapps_config:get_integer(?APP_NAME, <<"trie_lru_expires_s">>, ?SECONDS_IN_DAY).
+-endif.

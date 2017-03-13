@@ -19,9 +19,8 @@
 -module(hon_trie_lru).
 -behaviour(gen_server).
 
--export([start_link/1
-        ,match_did/2, match_did/3
-
+-export([start_link/1, start_link/2
+        ,stop/1
         ,cache_rates/2
         ]).
 
@@ -35,70 +34,60 @@
 
 -include("hotornot.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-define(DEBUG(_Fmt), 'ok'). %% ?debugFmt(Fmt, [])).
+-define(DEBUG(_Fmt, _Msg), 'ok'). %%  ?debugFmt(Fmt, Msg)).
+-else.
+-define(DEBUG(Fmt), lager:debug(Fmt)).
+-define(DEBUG(Fmt, Msg), lager:debug(Fmt, Msg)).
+-endif.
+
 -define(STATE_READY(Trie, RatedeckDb, CheckRef), {'ready', Trie, RatedeckDb, CheckRef}).
 
--define(CHECK_MSG, 'check_trie').
+-define(CHECK_MSG(ExpiresS), {'check_trie', ExpiresS}).
 
 -type state() :: ?STATE_READY(trie:trie(), ne_binary(), reference()).
 -type rate_entry() :: {ne_binary(), gregorian_seconds()}.
 -type rate_entries() :: [rate_entry()].
 
 -spec start_link(ne_binary()) -> {'ok', pid()}.
+-spec start_link(ne_binary(), pos_integer()) -> {'ok', pid()}.
 start_link(RatedeckDb) ->
+    start_link(RatedeckDb, hotornot_config:lru_expires_s()).
+
+start_link(RatedeckDb, ExpiresS) ->
     ProcName = hon_trie:trie_proc_name(RatedeckDb),
-    gen_server:start_link({'local', ProcName}, ?MODULE, [RatedeckDb], []).
+    gen_server:start_link({'local', ProcName}, ?MODULE, [RatedeckDb, ExpiresS], []).
 
--type match_return() :: {'error', any()} |
-                        {'ok', kzd_rate:docs()}.
--spec match_did(ne_binary(), api_ne_binary()) -> match_return().
--spec match_did(ne_binary(), api_ne_binary(), api_ne_binary()) -> match_return().
-match_did(ToDID, AccountId) ->
-    match_did(ToDID, AccountId, 'undefined').
-match_did(ToDID, AccountId, RatedeckId) ->
-    AccountRatedeckId = hon_util:account_ratedeck(AccountId, RatedeckId),
-    ProcName = hon_trie:trie_proc_name(AccountRatedeckId),
-
-    case gen_server:call(ProcName, {'match_did', kz_term:to_list(ToDID)}) of
-        {'error', 'not_found'} ->
-            lager:debug("failed to find rate for ~s", [ToDID]),
-            {'ok', []};
-        {'error', E} ->
-            lager:warning("failed to find rate for ~s, got error ~p", [ToDID, E]),
-            {'error', E};
-        {'ok', {_Prefix, RateIds}} ->
-            lager:info("candidate rates for ~s: ~s ~p", [ToDID, _Prefix, RateIds]),
-            load_rates(AccountRatedeckId, RateIds)
-    end.
-
--spec load_rates(ne_binary(), ne_binaries()) -> {'ok', kzd_rate:docs()}.
-load_rates(Ratedeck, RateIds) ->
-    RatedeckDb = kzd_ratedeck:format_ratedeck_db(Ratedeck),
-    {'ok', lists:foldl(fun(R, Acc) -> load_rate(R, Acc, RatedeckDb) end, [], RateIds)}.
-
--spec load_rate(ne_binary(), kz_json:objects(), ne_binary()) -> kzd_rate:docs().
-load_rate(RateId, Acc, RatedeckDb) ->
-    case kz_datamgr:open_cache_doc(RatedeckDb, RateId) of
-        {'error', _} -> Acc;
-        {'ok', RateDoc} ->
-            [kzd_rate:set_ratedeck(RateDoc, kzd_ratedeck:format_ratedeck_id(RatedeckDb)) | Acc]
+-spec stop(ne_binary()) -> 'ok'.
+stop(<<_/binary>>=RatedeckId) ->
+    ProcName = hon_trie:trie_proc_name(RatedeckId),
+    case whereis(ProcName) of
+        'undefined' -> 'ok';
+        Pid -> catch gen_server:call(Pid, 'stop')
     end.
 
 -spec cache_rates(ne_binary(), kzd_rate:docs()) -> 'ok'.
 cache_rates(RatedeckId, Rates) ->
     ProcName = hon_trie:trie_proc_name(RatedeckId),
-    gen_server:cast(ProcName, {'cache_rates', Rates}).
+    gen_server:call(ProcName, {'cache_rates', Rates}).
 
--spec init([ne_binary()]) -> {'ok', state()}.
-init([RatedeckDb]) ->
+-spec init([ne_binary() | pos_integer()]) -> {'ok', state()}.
+init([RatedeckDb, ExpiresS]) ->
     kz_util:put_callid(hon_trie:trie_proc_name(RatedeckDb)),
-    ExpiresCheckRef = start_expires_check_timer(),
+    ExpiresCheckRef = start_expires_check_timer(ExpiresS),
     {'ok', ?STATE_READY(trie:new(), RatedeckDb, ExpiresCheckRef)}.
 
--spec start_expires_check_timer() -> reference().
-start_expires_check_timer() ->
-    ExpiresS = hotornot_config:lru_expires_s(),
+-spec start_expires_check_timer(pos_integer()) -> reference().
+-ifdef(PROPER).
+start_expires_check_timer(ExpiresS) ->
+    erlang:start_timer(1 * ?MILLISECONDS_IN_SECOND, self(), ?CHECK_MSG(ExpiresS)).
+-else.
+start_expires_check_timer(ExpiresS) ->
     Check = (ExpiresS div 2) * ?MILLISECONDS_IN_SECOND,
-    erlang:start_timer(Check, self(), ?CHECK_MSG).
+    erlang:start_timer(Check, self(), ?CHECK_MSG(ExpiresS)).
+-endif.
 
 -spec handle_call(any(), pid_ref(), state()) ->
                          {'noreply', state()} |
@@ -106,13 +95,16 @@ start_expires_check_timer() ->
 handle_call({'match_did', DID}, _From, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
     {UpdatedTrie, Resp} = match_did_in_trie(DID, Trie),
     {'reply', Resp, ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
+handle_call({'cache_rates', Rates}, _From, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
+    UpdatedTrie = handle_caching_of_rates(Trie, Rates),
+    {'reply', 'ok', ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
+handle_call('stop', _From, State) ->
+    lager:info("requested to stop by ~p", [_From]),
+    {'stop', 'normal', State};
 handle_call(_Req, _From, State) ->
     {'noreply', State}.
 
 -spec handle_cast(any(), state()) -> {'noreply', state()}.
-handle_cast({'cache_rates', Rates}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
-    UpdatedTrie = handle_caching_of_rates(Trie, Rates),
-    {'noreply', ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
 handle_cast({'expunge_prefix', Prefix}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
     UpdatedTrie = trie:erase(Prefix, Trie),
     {'noreply', ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
@@ -121,11 +113,11 @@ handle_cast(_Req, State) ->
     {'noreply', State}.
 
 -spec handle_info(any(), state()) -> {'noreply', state()}.
-handle_info({'timeout', CheckRef, ?CHECK_MSG}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
+handle_info({'timeout', CheckRef, ?CHECK_MSG(ExpiresS)}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
     _ = check_expired_entries(Trie),
-    {'noreply', ?STATE_READY(Trie, RatedeckDb, start_expires_check_timer())};
-handle_info(Msg, State) ->
-    lager:debug("unhandled message ~p",[Msg]),
+    {'noreply', ?STATE_READY(Trie, RatedeckDb, start_expires_check_timer(ExpiresS))};
+handle_info(_Msg, State) ->
+    ?DEBUG("unhandled message ~p",[_Msg]),
     {'noreply', State}.
 
 -spec check_expired_entries(trie:trie()) -> 'ok'.
@@ -135,7 +127,7 @@ check_expired_entries(Trie) ->
     'ok'.
 
 check_expired_entries(Trie, ParentPid) ->
-    lager:debug("checking trie for expired entries"),
+    ?DEBUG("checking trie for expired entries"),
     Expires = hotornot_config:lru_expires_s(),
     Now = kz_time:current_tstamp(),
     trie:foldl(fun check_if_expired/3
@@ -146,10 +138,10 @@ check_expired_entries(Trie, ParentPid) ->
 check_if_expired(Prefix, Rates, {ParentPid, OldestTimestamp}=Acc) ->
     case [RateId || {RateId, LastUsed} <- Rates, LastUsed < OldestTimestamp] of
         [] -> 'ok';
-        [_|_]=Rates ->
-            lager:debug("prefix ~s has expired rates: ~s"
-                       ,[Prefix, kz_binary:join(Rates)]
-                       ),
+        [_|_]=_OldRates ->
+            ?DEBUG("prefix ~s has expired rates: ~s"
+                  ,[Prefix, kz_binary:join(_OldRates)]
+                  ),
             gen_server:cast(ParentPid, {'expunge_prefix', Prefix})
     end,
     Acc.
@@ -162,7 +154,7 @@ terminate(_Reason, ?STATE_READY(_, _, _)) ->
 code_change(_Vsn, State, _Extra) ->
     {'ok', State}.
 
--spec match_did_in_trie(string(), trie:trie()) -> {trie:tie(), match_return()}.
+-spec match_did_in_trie(string(), trie:trie()) -> {trie:trie(), match_return()}.
 match_did_in_trie(DID, Trie) ->
     case trie:find_prefix_longest(DID, Trie) of
         'error' -> {Trie, {'error', 'not_found'}};
@@ -186,8 +178,10 @@ handle_caching_of_rates(Trie, Rates) ->
 cache_rate(Rate, Trie) ->
     Id = kz_doc:id(Rate),
     Prefix = kz_term:to_list(kzd_rate:prefix(Rate)),
-    lager:debug("caching ~s for prefix ~s", [Id, Prefix]),
+    NowMs = kz_time:current_tstamp(),
+    ?DEBUG("caching ~s for prefix ~s into ~p~n", [Id, Prefix, Trie]),
     trie:update(Prefix
-               ,fun(Rates) -> props:insert_value(Rate, kz_time:current_tstamp(), Rates) end
+               ,fun(Rates) -> props:insert_value(Id, NowMs, Rates) end
+               ,[{Id, NowMs}]
                ,Trie
                ).
