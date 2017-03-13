@@ -196,7 +196,7 @@ delete(Context, _Id, Node, Doc) ->
 %%--------------------------------------------------------------------
 -spec create(ne_binary(), cb_context:context(), api_ne_binary()) -> cb_context:context().
 create(Id, Context, Node) ->
-    validate_with_parent(Context, Id, Node, get_system_config(Id, Node)).
+    validate_with_parent(Context, Id, Node, default(Id)).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -230,7 +230,7 @@ read_for_delete(Id, Context) ->
 %%--------------------------------------------------------------------
 -spec update(ne_binary(), cb_context:context(), api_ne_binary()) -> cb_context:context().
 update(Id, Context, Node) ->
-    validate_with_parent(Context, Id, Node, get_system_config(Id, Node)).
+    validate_with_parent(Context, Id, Node, default(Id)).
 
 %%--------------------------------------------------------------------
 %% @private
