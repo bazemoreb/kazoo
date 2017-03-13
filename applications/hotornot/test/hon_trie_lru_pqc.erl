@@ -24,7 +24,7 @@
 
 correct_test_() ->
     [{'timeout'
-     ,5 * ?SECONDS_IN_MINUTE
+     ,10 * ?SECONDS_IN_MINUTE
      ,[?_assertEqual('true'
                     ,proper:quickcheck(?MODULE:correct(), [{'to_file', 'user'}])
                     )
