@@ -18,7 +18,7 @@
         ,validate/1, validate/2, validate/3
         ,put/2
         ,post/2, post/3
-        ,delete/2, delete/3
+        ,delete/2, delete/3, make_default/2, make_schema/1
         ]).
 
 -include("crossbar.hrl").
@@ -106,33 +106,46 @@ resource_exists(_Id, _Node) -> 'true'.
 %% Generally, use crossbar_doc to manipulate the cb_context{} record
 %% @end
 %%--------------------------------------------------------------------
--spec validate(cb_context:context()) ->
-                      cb_context:context().
--spec validate(cb_context:context(), path_token()) ->
-                      cb_context:context().
--spec validate(cb_context:context(), path_token(), path_token()) ->
-                      cb_context:context().
+-spec validate(cb_context:context()) -> cb_context:context().
 validate(Context) ->
-    validate_system_configs(update_db(Context), cb_context:req_verb(Context)).
+    summary(update_db(Context)).
 
+-spec validate(cb_context:context(), path_token()) -> cb_context:context().
 validate(Context, Id) ->
-    Node = cb_context:req_value(Context, <<"node">>, ?DEFAULT),
-    validate_system_config(update_db(Context), Id, cb_context:req_verb(Context), Node).
+    validate_verb(update_db(Context), Id, cb_context:req_verb(Context)).
 
+-spec validate(cb_context:context(), path_token(), path_token()) -> cb_context:context().
 validate(Context, Id, Node) ->
     validate_system_config(update_db(Context), Id, cb_context:req_verb(Context), Node).
 
--spec validate_system_configs(cb_context:context(), http_method()) -> cb_context:context().
--spec validate_system_config(cb_context:context(), path_token(), http_method(), api_ne_binary()) -> cb_context:context().
-validate_system_configs(Context, ?HTTP_GET) ->
-    summary(Context).
+-spec validate_verb(cb_context:context(), path_token(), http_method()) -> cb_context:context().
+validate_verb(Context, Id, ?HTTP_GET) ->
+    JObj = maybe_new(kapps_config:get_category(Id)),
+    crossbar_doc:handle_datamgr_success(set_id(Id, JObj), Context);
 
+validate_verb(Context, Id, ?HTTP_PUT) ->
+    validate_verb(Context, Id, ?HTTP_POST);
+
+validate_verb(Context, Id, ?HTTP_POST) ->
+    RequestData = kz_json:public_fields(strip_id(cb_context:req_data(Context))),
+    Doc = maybe_new(kapps_config:get_category(Id)),
+    Default = make_default(Id, kz_json:get_keys(RequestData)),
+    validate_request(Context, Id, make_schema(Id), kz_json:merge_recursive(Doc, Default));
+
+validate_verb(Context, Id, ?HTTP_DELETE) ->
+    read_for_delete(Id, Context).
+
+-spec validate_system_config(cb_context:context(), path_token(), http_method(), api_ne_binary()) -> cb_context:context().
 validate_system_config(Context, Id, ?HTTP_GET, Node) ->
-    read(Id, Context, Node);
+    JObj = get_system_config(Id, Node),
+    crossbar_doc:handle_datamgr_success(set_id(Id, Node, JObj), Context);
+
 validate_system_config(Context, Id, ?HTTP_PUT, Node) ->
-    create(Id, Context, Node);
+    validate_with_parent(Context, Id, Node, default(Id));
+
 validate_system_config(Context, Id, ?HTTP_POST, Node) ->
-    update(Id, Context, Node);
+    validate_with_parent(Context, Id, Node, default(Id));
+
 validate_system_config(Context, Id, ?HTTP_DELETE, _Node) ->
     read_for_delete(Id, Context).
 
@@ -157,8 +170,13 @@ put(Context, _Id) ->
 -spec post(cb_context:context(), path_token(), path_token()) -> cb_context:context().
 post(Context, _Id) ->
     crossbar_doc:save(Context).
-post(Context, _Id, _Node) ->
-    crossbar_doc:save(Context).
+post(Context, Id, Node) ->
+    Ctx = crossbar_doc:save(Context),
+    case cb_context:resp_status(Ctx) of
+        success ->
+            cb_context:set_resp_data(Ctx, set_id(<<Id/binary,"/",Node/binary>>, cb_context:resp_data(Ctx)));
+        _ -> Ctx
+    end.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -191,26 +209,12 @@ delete(Context, _Id, Node, Doc) ->
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% Create a new instance with the data provided, if it is valid
-%% @end
-%%--------------------------------------------------------------------
--spec create(ne_binary(), cb_context:context(), api_ne_binary()) -> cb_context:context().
-create(Id, Context, Node) ->
-    validate_with_parent(Context, Id, Node, default(Id)).
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
 %% Load an instance from the database
 %% @end
 %%--------------------------------------------------------------------
--spec read(ne_binary(), cb_context:context(), api_ne_binary()) -> cb_context:context().
+-spec read(ne_binary(), cb_context:context()) -> cb_context:context().
 read(Id, Context) ->
     crossbar_doc:load(Id, Context, ?TYPE_CHECK_OPTION(<<"config">>)).
-
-read(Id, Context, Node) ->
-    JObj = get_system_config(Id, Node),
-    crossbar_doc:handle_datamgr_success(set_id(Id, JObj), Context).
 
 -spec read_for_delete(ne_binary(), cb_context:context()) -> cb_context:context().
 read_for_delete(Id, Context) ->
@@ -221,16 +225,6 @@ read_for_delete(Id, Context) ->
             lager:debug("failed to find ~s(~s) for delete", [Id, _Status]),
             Context1
     end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Update an existing system_config document with the data provided
-%% @end
-%%--------------------------------------------------------------------
--spec update(ne_binary(), cb_context:context(), api_ne_binary()) -> cb_context:context().
-update(Id, Context, Node) ->
-    validate_with_parent(Context, Id, Node, default(Id)).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -264,6 +258,16 @@ update_db(Context) ->
 -spec set_id(ne_binary(), kz_json:object()) -> kz_json:object().
 set_id(ConfigId, JObj) -> kz_json:set_value(<<"id">>, ConfigId, JObj).
 
+-spec set_id(ne_binary(), ne_binary(), kz_json:object()) -> kz_json:object().
+set_id(ConfigId, Node, JObj) ->
+    kz_doc:set_id(JObj, <<ConfigId/binary, "/", Node/binary>>).
+
+maybe_set_id(ConfigId, JObj) ->
+    case kapps_config:get_category(ConfigId) of
+        {ok, Doc} -> kz_json:merge_recursive(Doc, JObj);
+        _ -> kz_doc:set_id(JObj, ConfigId)
+    end.
+
 -spec strip_id(kz_json:object()) -> kz_json:object().
 strip_id(JObj) -> kz_json:delete_key(<<"id">>, JObj, prune).
 
@@ -276,6 +280,17 @@ validate_with_parent(Context, ConfigId, Node, Parent) ->
                                      fun(Ctx) ->
                                              Doc = kz_json:set_value(Node, kz_json:diff(RequestData, Parent),
                                                                      kz_doc:set_id(maybe_new(kapps_config:get_category(ConfigId)), ConfigId)),
+                                             cb_context:set_doc(Ctx, Doc)
+                                     end
+                                    ).
+
+-spec validate_request(cb_context:context(), ne_binary(), ne_binary(), kz_json:object()) -> cb_context:context().
+validate_request(Context, Id, Schema, Parent) ->
+    RequestData = strip_id(cb_context:req_data(Context)),
+    FullConfig = kz_json:merge_recursive(strip_id(kz_json:public_fields(Parent)), RequestData),
+    cb_context:validate_request_data(Schema, cb_context:set_req_data(Context, FullConfig),
+                                     fun(Ctx) ->
+                                             Doc = maybe_set_id(Id, kz_json:diff(RequestData, Parent)),
                                              cb_context:set_doc(Ctx, Doc)
                                      end
                                     ).
@@ -293,3 +308,16 @@ get_system_config(Config, Node) ->
     System = maybe_new(kapps_config:get_category(Config)),
     SystemNode = kz_json:get_value(Node, System, kz_json:new()),
     kz_json:merge_recursive(Default, SystemNode).
+
+-spec make_schema(ne_binary()) -> kz_json:object().
+make_schema(Id) ->
+    Flat = [
+        {[<<"patternProperties">>, <<".+">>, <<"$ref">>], kapps_config_util:system_schema_name(Id)}
+        ,{[<<"patternProperties">>, <<".+">>, <<"type">>], <<"object">>}
+        ,{<<"type">>, <<"object">>}
+    ],
+    kz_json:expand(kz_json:from_list(Flat)).
+
+-spec make_default(ne_binary(), [ne_binary()]) -> kz_json:object().
+make_default(Id, Keys) ->
+    lists:foldl(fun(K, Json) -> kz_json:set_value(K, default(Id), Json) end, kz_json:new(), Keys).
