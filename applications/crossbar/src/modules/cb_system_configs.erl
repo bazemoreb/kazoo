@@ -312,10 +312,10 @@ get_system_config(Config, Node) ->
 -spec make_schema(ne_binary()) -> kz_json:object().
 make_schema(Id) ->
     Flat = [
-        {[<<"patternProperties">>, <<".+">>, <<"$ref">>], kapps_config_util:system_schema_name(Id)}
-        ,{[<<"patternProperties">>, <<".+">>, <<"type">>], <<"object">>}
-        ,{<<"type">>, <<"object">>}
-    ],
+            {[<<"patternProperties">>, <<".+">>, <<"$ref">>], kapps_config_util:system_schema_name(Id)}
+           ,{[<<"patternProperties">>, <<".+">>, <<"type">>], <<"object">>}
+           ,{<<"type">>, <<"object">>}
+           ],
     kz_json:expand(kz_json:from_list(Flat)).
 
 -spec make_default(ne_binary(), [ne_binary()]) -> kz_json:object().
