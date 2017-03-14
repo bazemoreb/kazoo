@@ -85,12 +85,8 @@ match_did(ToDID, AccountId, RatedeckId) ->
     ProcName = trie_proc_name(Ratedeck),
 
     case gen_server:call(ProcName, {'match_did', kz_term:to_list(ToDID)}) of
-        {'error', _}=Error ->
-            lager:warning("failed to find rate for ~s, got error ~p", [ToDID, Error]),
-            Error;
-        {'ok', {_Prefix, RateIds}} ->
-            lager:info("candidate rates for ~s: ~s ~p", [ToDID, _Prefix, RateIds]),
-            load_rates(Ratedeck, RateIds)
+        {'error', _}=Error -> Error;
+        {'ok', {_Prefix, RateIds}} -> load_rates(Ratedeck, RateIds)
     end.
 
 -spec load_rates(ne_binary(), ne_binaries()) -> {'ok', kzd_rate:docs()}.

@@ -105,46 +105,39 @@ handle_call(_Req, _From, State) ->
     {'noreply', State}.
 
 -spec handle_cast(any(), state()) -> {'noreply', state()}.
-handle_cast({'expunge_prefix', Prefix}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
-    UpdatedTrie = trie:erase(Prefix, Trie),
-    {'noreply', ?STATE_READY(UpdatedTrie, RatedeckDb, CheckRef)};
 handle_cast(_Req, State) ->
     lager:info("unhandled cast ~p", [_Req]),
     {'noreply', State}.
 
 -spec handle_info(any(), state()) -> {'noreply', state()}.
 handle_info({'timeout', CheckRef, ?CHECK_MSG(ExpiresS)}, ?STATE_READY(Trie, RatedeckDb, CheckRef)) ->
-    _ = check_expired_entries(Trie),
+    _ = check_expired_entries(Trie, ExpiresS),
     {'noreply', ?STATE_READY(Trie, RatedeckDb, start_expires_check_timer(ExpiresS))};
 handle_info(_Msg, State) ->
     ?DEBUG("unhandled message ~p",[_Msg]),
     {'noreply', State}.
 
--spec check_expired_entries(trie:trie()) -> 'ok'.
-check_expired_entries(Trie) ->
-    Self = self(),
-    _ = spawn(fun() -> check_expired_entries(Trie, Self) end),
-    'ok'.
-
-check_expired_entries(Trie, ParentPid) ->
-    ?DEBUG("checking trie for expired entries"),
-    Expires = hotornot_config:lru_expires_s(),
-    Now = kz_time:current_tstamp(),
-    trie:foldl(fun check_if_expired/3
-              ,{ParentPid, Now - Expires}
-              ,Trie
-              ).
-
-check_if_expired(Prefix, Rates, {ParentPid, OldestTimestamp}=Acc) ->
-    case [RateId || {RateId, LastUsed} <- Rates, LastUsed < OldestTimestamp] of
-        [] -> 'ok';
-        [_|_]=_OldRates ->
-            ?DEBUG("prefix ~s has expired rates: ~s"
-                  ,[Prefix, kz_binary:join(_OldRates)]
+-spec check_expired_entries(trie:trie(), pos_integer()) -> trie:trie().
+check_expired_entries(Trie, ExpiresS) ->
+    Oldest = kz_time:current_tstamp() - ExpiresS,
+    {UpdatedTrie, Oldest} =
+        trie:foldl(fun check_if_expired/3
+                  ,{Trie, Oldest}
+                  ,Trie
                   ),
-            gen_server:cast(ParentPid, {'expunge_prefix', Prefix})
-    end,
-    Acc.
+    UpdatedTrie.
+
+-spec check_if_expired(prefix(), [{ne_binary(), gregorian_seconds()}], {pid(), gregorian_seconds()}) ->
+                              {pid(), gregorian_seconds()}.
+check_if_expired(Prefix, Rates, {Trie, OldestTimestamp}=Acc) ->
+    case [RateId
+          || {RateId, LastUsed} <- Rates,
+             LastUsed < OldestTimestamp
+         ]
+    of
+        [] -> Acc;
+        [_|_]=_OldRates -> {trie:erase(Prefix, Trie), OldestTimestamp}
+    end.
 
 -spec terminate(any(), state()) -> 'ok'.
 terminate(_Reason, ?STATE_READY(_, _, _)) ->
