@@ -2,14 +2,12 @@
 
 -ifdef(PROPER).
 -include_lib("proper/include/proper.hrl").
--endif.
 
 -include_lib("eunit/include/eunit.hrl").
 
 -include_lib("kazoo_json/include/kazoo_json.hrl").
 -include_lib("kazoo/include/kz_databases.hrl").
 
--ifdef(PROPER).
 -behaviour(proper_statem).
 
 -export([command/1
@@ -22,28 +20,12 @@
         ,correct_parallel/0
         ]).
 
-correct_test_() ->
-    [{'timeout'
-     ,30 * ?SECONDS_IN_MINUTE
-     ,[?_assertEqual('true'
-                    ,proper:quickcheck(?MODULE:correct(), [{'to_file', 'user'}])
-                    )
-      ]
-     }
-    ].
-
-correct_parallel_test_() ->
-    [].
-%% [{'timeout'
-%%  ,30 * ?SECONDS_IN_MINUTE
-%%  ,[?_assertEqual('true'
-%%                 ,proper:quickcheck(?MODULE:correct_parallel(), [{'to_file', 'user'}])
-%%                 )
-%%   ]
-%%  }
-%% ].
-
 -define(EXPIRES_S, 2). % expire after 2 seconds
+-record(model, {cache = []
+               ,now_ms = 0
+               ,next_purge = ?EXPIRES_S * 1000
+               }
+       ).
 
 correct() ->
     ?FORALL(Cmds
@@ -55,8 +37,8 @@ correct() ->
                    {History, State, Result} = run_commands(?MODULE, Cmds),
                    hon_trie_lru:stop(?KZ_RATES_DB),
 
-                   ?WHENFAIL(?debugFmt("Final State: ~p~nRecreate:~n~s~nZip: ~p~nResult: ~p~n"
-                                      ,[State, recreate_steps(Cmds), zip(Cmds, History), Result]
+                   ?WHENFAIL(?debugFmt("~nLRU: ~p~n Final State: ~p~nRecreate:~n~s~nZip:~n~s~n"
+                                      ,[_Pid, State, recreate_steps(Cmds), print_zip(zip(Cmds, History))]
                                       )
                             ,aggregate(command_names(Cmds), Result =:= 'ok')
                             )
@@ -72,6 +54,16 @@ recreate_step({'set', _Var, {'call', M, F, As}}) ->
 
 args_to_list(Args) ->
     string:join([io_lib:format("~p", [A]) || A <- Args], ", ").
+
+print_zip(Zip) ->
+    [print_zip_item(Item) || Item <- Zip].
+
+print_zip_item({{set, _Var, {call, M, F, As}}
+               ,{#model{cache=Cache, now_ms=NowMs}, Result}
+               }) ->
+    io_lib:format("~6b: cache: ~p calling ~s:~s(~s) results in ~p~n"
+                 ,[NowMs, Cache, M, F, args_to_list(As), Result]
+                 ).
 
 correct_parallel() ->
     ?FORALL(Cmds
@@ -92,56 +84,64 @@ correct_parallel() ->
               )
            ).
 
--define(MODEL(Cache, NowMs), {Cache, NowMs}).
-
 -type cache() :: [{ne_binary(), {ne_binary(), gregorian_seconds()}}].
 initial_state() ->
-    ?MODEL([], 0).
+    #model{}.
 
-command(?MODEL(_, _)) ->
+command(#model{}) ->
+    Ms = ?EXPIRES_S * ?MILLISECONDS_IN_SECOND,
     oneof([{'call', 'hon_trie', 'match_did', [phone_number(), 'undefined', ?KZ_RATES_DB]}
           ,{'call', 'hon_trie_lru', 'cache_rates', [?KZ_RATES_DB, [rate_doc()]]}
-          ,{'call', 'timer', 'sleep', [range(100,1000)]}
+          ,{'call', 'timer', 'sleep', [range(Ms-100,Ms+100)]}
           ]).
 
-next_state(?MODEL(Cache, NowMs)=State
+next_state(#model{now_ms=NowMs
+                 ,next_purge=NextPurge
+                 ,cache=Cache
+                 }=Model
+          ,V
+          ,Call
+          ) when NextPurge < NowMs ->
+    next_state(Model#model{cache=expire_rates(Cache, NowMs)
+                          ,next_purge=NextPurge + (?EXPIRES_S * 1000)
+                          }
+              ,V
+              ,Call
+              );
+next_state(#model{cache=Cache
+                 ,now_ms=NowMs
+                 }=Model
           ,_V
           ,{'call', 'hon_trie', 'match_did', [PhoneNumber, _AccountId, _RatedeckId]}
           ) ->
     case find_prefix(Cache, PhoneNumber) of
-        'error' ->
-            %% ?debugFmt("ns: failed to fine ~p in ~p~n", [PhoneNumber, Cache]),
-            State;
+        'error' -> Model;
         {'ok', Prefix, RateIds} ->
-            %% ?debugFmt("ns: found ~p in ~p: ~p~n", [PhoneNumber, Cache, Prefix]),
-            UpdatedCache = bump_matched(Cache, NowMs, Prefix, RateIds),
-            %% ?debugFmt("ns: updated cache to ~p~n", [UpdatedCache]),
-            ?MODEL(UpdatedCache, NowMs)
+            Model#model{cache=bump_matched(Cache, NowMs, Prefix, RateIds)}
     end;
-next_state(?MODEL(Cache, NowMs)
+next_state(#model{cache=Cache
+                 ,now_ms=NowMs
+                 }=Model
           ,_V
           ,{'call', 'hon_trie_lru', 'cache_rates', [_RatedeckId, RateDocs]}
           ) ->
-    %% ?debugFmt("ns: caching ~p at ~p into ~p ~n", [RateDocs, NowMs, Cache]),
     {UpdatedCache, NowMs} = cache_rates(Cache, NowMs, RateDocs),
-    %% ?debugFmt("ns: new cache: ~p~n", [UpdatedCache]),
-    ?MODEL(UpdatedCache, NowMs);
-next_state(?MODEL(Cache, ThenMs)
+    Model#model{cache=UpdatedCache};
+next_state(#model{now_ms=ThenMs}=Model
           ,_V
           ,{'call', 'timer', 'sleep', [SleepMs]}
           ) ->
     NowMs = ThenMs + SleepMs,
-    UpdatedCache = expire_rates(Cache, NowMs),
-    ?MODEL(UpdatedCache, NowMs).
+    Model#model{now_ms=NowMs}.
 
 precondition(_Model, _Call) -> 'true'.
 
-postcondition(?MODEL(Cache, _NowMs)
+postcondition(#model{cache=Cache}
              ,{'call', 'hon_trie', 'match_did', [PhoneNumber, _AccountId, _RatedeckId]}
              ,{'error', 'not_found'}
              ) ->
     find_prefix(Cache, PhoneNumber) =:= 'error';
-postcondition(?MODEL(Cache, _NowMs)
+postcondition(#model{cache=Cache}
              ,{'call', 'hon_trie', 'match_did', [PhoneNumber, _AccountId, _RatedeckId]}
              ,{'ok', RateDocs}
              ) ->
@@ -151,12 +151,12 @@ postcondition(?MODEL(Cache, _NowMs)
             length(RateDocs) =:= length(RateIds)
                 andalso lists:all(fun(RateId) -> props:is_defined(RateId, RateIds) end, RateDocs)
     end;
-postcondition(?MODEL(_Cache, _NowMs)
+postcondition(#model{}
              ,{'call', 'hon_trie_lru', 'cache_rates', [_RatedeckId, _Rates]}
              ,'ok'
              ) ->
     'true';
-postcondition(?MODEL(_Cache, _NowMs)
+postcondition(#model{}
              ,{'call', 'timer', 'sleep', [_Wait]}
              ,'ok'
              ) ->
