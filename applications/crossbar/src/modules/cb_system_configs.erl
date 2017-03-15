@@ -293,7 +293,7 @@ strip_iid(JObj) -> kz_json:delete_key(<<"_id">>, JObj, prune).
 
 -spec validate_with_parent(cb_context:context(), ne_binary(), ne_binary(), kz_json:object()) -> cb_context:context().
 validate_with_parent(Context, ConfigId, Node, Parent) ->
-    RequestData = strip_id(cb_context:req_data(Context)),
+    RequestData = strip_id(kz_json:public_fields(cb_context:req_data(Context))),
     FullConfig = kz_json:merge_recursive(Parent, RequestData),
     Schema = kapps_config_util:system_schema_name(ConfigId),
     cb_context:validate_request_data(Schema, cb_context:set_req_data(Context, FullConfig),
@@ -306,7 +306,7 @@ validate_with_parent(Context, ConfigId, Node, Parent) ->
 
 -spec validate_request(cb_context:context(), ne_binary(), ne_binary(), kz_json:object()) -> cb_context:context().
 validate_request(Context, Id, Schema, Parent) ->
-    RequestData = strip_id(cb_context:req_data(Context)),
+    RequestData = strip_id(kz_json:public_fields(cb_context:req_data(Context))),
     FullConfig = kz_json:merge_recursive(strip_id(kz_json:public_fields(Parent)), RequestData),
     cb_context:validate_request_data(Schema, cb_context:set_req_data(Context, FullConfig),
                                      fun(Ctx) ->
