@@ -18,6 +18,7 @@
         ,validate/1, validate/2, validate/3
         ,put/2
         ,post/2, post/3
+        ,patch/2, patch/3
         ,delete/2, delete/3, make_default/2, make_schema/1
         ]).
 
@@ -47,6 +48,7 @@ init() ->
     _ = crossbar_bindings:bind(<<"*.validate.system_configs">>, ?MODULE, 'validate'),
     _ = crossbar_bindings:bind(<<"*.execute.put.system_configs">>, ?MODULE, 'put'),
     _ = crossbar_bindings:bind(<<"*.execute.post.system_configs">>, ?MODULE, 'post'),
+    _ = crossbar_bindings:bind(<<"*.execute.patch.system_configs">>, ?MODULE, 'patch'),
     _ = crossbar_bindings:bind(<<"*.execute.delete.system_configs">>, ?MODULE, 'delete').
 
 %%--------------------------------------------------------------------
@@ -76,9 +78,9 @@ authorize(Context, _Id, _Node) -> cb_context:is_superduper_admin(Context).
 allowed_methods() ->
     [?HTTP_GET].
 allowed_methods(_SystemConfigId) ->
-    [?HTTP_GET, ?HTTP_POST, ?HTTP_DELETE, ?HTTP_PUT].
+    [?HTTP_GET, ?HTTP_POST, ?HTTP_DELETE, ?HTTP_PUT, ?HTTP_PATCH].
 allowed_methods(_SystemConfigId, _Node) ->
-    [?HTTP_GET, ?HTTP_POST, ?HTTP_DELETE].
+    [?HTTP_GET, ?HTTP_POST, ?HTTP_DELETE, ?HTTP_PATCH].
 
 %%--------------------------------------------------------------------
 %% @public
@@ -120,7 +122,7 @@ validate(Context, Id, Node) ->
 
 -spec validate_verb(cb_context:context(), path_token(), http_method()) -> cb_context:context().
 validate_verb(Context, Id, ?HTTP_GET) ->
-    JObj = maybe_new(kapps_config:get_category(Id)),
+    JObj = get_system_config(Id),
     crossbar_doc:handle_datamgr_success(set_id(Id, JObj), Context);
 
 validate_verb(Context, Id, ?HTTP_PUT) ->
@@ -131,6 +133,10 @@ validate_verb(Context, Id, ?HTTP_POST) ->
     Doc = maybe_new(kapps_config:get_category(Id)),
     Default = make_default(Id, kz_json:get_keys(RequestData)),
     validate_request(Context, Id, make_schema(Id), kz_json:merge_recursive(Doc, Default));
+
+validate_verb(Context, Id, ?HTTP_PATCH) ->
+    Doc = maybe_new(kapps_config:get_category(Id)),
+    validate_request(Context, Id, make_schema(Id), kz_json:merge_recursive(Doc, get_system_config(Id)));
 
 validate_verb(Context, Id, ?HTTP_DELETE) ->
     read_for_delete(Id, Context).
@@ -145,6 +151,9 @@ validate_system_config(Context, Id, ?HTTP_PUT, Node) ->
 
 validate_system_config(Context, Id, ?HTTP_POST, Node) ->
     validate_with_parent(Context, Id, Node, default(Id));
+
+validate_system_config(Context, Id, ?HTTP_PATCH, Node) ->
+    validate_with_parent(Context, Id, Node, get_system_config(Id, Node));
 
 validate_system_config(Context, Id, ?HTTP_DELETE, _Node) ->
     read_for_delete(Id, Context).
@@ -168,15 +177,27 @@ put(Context, _Id) ->
 %%--------------------------------------------------------------------
 -spec post(cb_context:context(), path_token()) -> cb_context:context().
 -spec post(cb_context:context(), path_token(), path_token()) -> cb_context:context().
-post(Context, _Id) ->
-    crossbar_doc:save(Context).
+post(Context, Id) ->
+    Ctx = crossbar_doc:save(Context),
+    case cb_context:resp_status(Ctx) of
+        success ->
+            cb_context:set_resp_data(Ctx, set_id(Id, get_system_config(Id)));
+        _ -> Ctx
+    end.
 post(Context, Id, Node) ->
     Ctx = crossbar_doc:save(Context),
     case cb_context:resp_status(Ctx) of
         success ->
-            cb_context:set_resp_data(Ctx, set_id(<<Id/binary,"/",Node/binary>>, cb_context:resp_data(Ctx)));
+            cb_context:set_resp_data(Ctx, set_id(<<Id/binary,"/",Node/binary>>, strip_iid(get_system_config(Id, Node))));
         _ -> Ctx
     end.
+
+-spec patch(cb_context:context(), path_token()) -> cb_context:context().
+-spec patch(cb_context:context(), path_token(), path_token()) -> cb_context:context().
+patch(Context, Id) ->
+    post(Context, Id).
+patch(Context, Id, Node) ->
+    post(Context, Id, Node).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -212,13 +233,9 @@ delete(Context, _Id, Node, Doc) ->
 %% Load an instance from the database
 %% @end
 %%--------------------------------------------------------------------
--spec read(ne_binary(), cb_context:context()) -> cb_context:context().
-read(Id, Context) ->
-    crossbar_doc:load(Id, Context, ?TYPE_CHECK_OPTION(<<"config">>)).
-
 -spec read_for_delete(ne_binary(), cb_context:context()) -> cb_context:context().
 read_for_delete(Id, Context) ->
-    Context1 = read(Id, Context),
+    Context1 = crossbar_doc:load(Id, Context, ?TYPE_CHECK_OPTION(<<"config">>)),
     case cb_context:resp_status(Context) of
         'success' -> Context1;
         _Status ->
@@ -271,6 +288,9 @@ maybe_set_id(ConfigId, JObj) ->
 -spec strip_id(kz_json:object()) -> kz_json:object().
 strip_id(JObj) -> kz_json:delete_key(<<"id">>, JObj, prune).
 
+-spec strip_iid(kz_json:object()) -> kz_json:object().
+strip_iid(JObj) -> kz_json:delete_key(<<"_id">>, JObj, prune).
+
 -spec validate_with_parent(cb_context:context(), ne_binary(), ne_binary(), kz_json:object()) -> cb_context:context().
 validate_with_parent(Context, ConfigId, Node, Parent) ->
     RequestData = strip_id(cb_context:req_data(Context)),
@@ -309,6 +329,12 @@ get_system_config(Config, Node) ->
     SystemNode = kz_json:get_value(Node, System, kz_json:new()),
     kz_json:merge_recursive(Default, SystemNode).
 
+-spec get_system_config(ne_binary()) -> kz_json:object().
+get_system_config(Config) ->
+    System = maybe_new(kapps_config:get_category(Config)),
+    Default = make_default(Config, maybe_add_default(kz_json:get_keys(strip_id(kz_json:public_fields(System))))),
+    kz_json:merge_recursive(Default, System).
+
 -spec make_schema(ne_binary()) -> kz_json:object().
 make_schema(Id) ->
     Flat = [
@@ -321,3 +347,9 @@ make_schema(Id) ->
 -spec make_default(ne_binary(), [ne_binary()]) -> kz_json:object().
 make_default(Id, Keys) ->
     lists:foldl(fun(K, Json) -> kz_json:set_value(K, default(Id), Json) end, kz_json:new(), Keys).
+
+maybe_add_default(Keys) ->
+    case lists:member(?DEFAULT, Keys) of
+        false -> [?DEFAULT | Keys ];
+        true -> Keys
+    end.
