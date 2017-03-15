@@ -338,7 +338,9 @@ get_system_config(Config) ->
 -spec make_schema(ne_binary()) -> kz_json:object().
 make_schema(Id) ->
     Flat = [
-            {[<<"patternProperties">>, <<".+">>, <<"$ref">>], kapps_config_util:system_schema_name(Id)}
+            {<<"$schema">>,<<"http://json-schema.org/draft-04/schema#">>}
+           ,{<<"id">>, <<"system_config">>}
+           ,{[<<"patternProperties">>, <<".+">>, <<"$ref">>], kapps_config_util:system_schema_name(Id)}
            ,{[<<"patternProperties">>, <<".+">>, <<"type">>], <<"object">>}
            ,{<<"type">>, <<"object">>}
            ],
